@@ -1,0 +1,167 @@
+@import "tailwindcss";
+
+/* ─── Fuentes ─────────────────────────────────────── */
+@theme {
+  --font-sans: 'Plus Jakarta Sans', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+/* ─── Variables de diseño ContaFácil ─────────────── */
+:root {
+  /* Colores principales */
+  --cf-navy:        #0D1B2A;
+  --cf-blue:        #185FA5;
+  --cf-blue-light:  #E6F1FB;
+  --cf-green:       #1D9E75;
+  --cf-green-light: #EAF3DE;
+  --cf-amber:       #BA7517;
+  --cf-amber-light: #FAEEDA;
+  --cf-red:         #A32D2D;
+  --cf-red-light:   #FCEBEB;
+
+  /* Superficies modo claro */
+  --cf-bg:          #FAFAF8;
+  --cf-bg-card:     #FFFFFF;
+  --cf-bg-subtle:   #F4F4F1;
+  --cf-border:      rgba(0,0,0,0.08);
+  --cf-border-md:   rgba(0,0,0,0.14);
+
+  /* Texto modo claro */
+  --cf-text-primary:   #0D1B2A;
+  --cf-text-secondary: #4A5568;
+  --cf-text-tertiary:  #718096;
+
+  /* Semáforo */
+  --cf-semaforo-verde:   #1D9E75;
+  --cf-semaforo-amarillo:#BA7517;
+  --cf-semaforo-rojo:    #A32D2D;
+
+  /* Espaciado y radios */
+  --cf-radius-sm: 6px;
+  --cf-radius-md: 10px;
+  --cf-radius-lg: 14px;
+  --cf-radius-xl: 20px;
+
+  /* Sombras */
+  --cf-shadow-sm: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+  --cf-shadow-md: 0 4px 12px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.04);
+}
+
+/* ─── Modo oscuro ─────────────────────────────────── */
+.dark {
+  --cf-bg:          #0D1117;
+  --cf-bg-card:     #161B22;
+  --cf-bg-subtle:   #1C2128;
+  --cf-border:      rgba(255,255,255,0.08);
+  --cf-border-md:   rgba(255,255,255,0.14);
+
+  --cf-text-primary:   #E6EDF3;
+  --cf-text-secondary: #8B949E;
+  --cf-text-tertiary:  #6E7681;
+}
+
+/* ─── Base ────────────────────────────────────────── */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--cf-bg);
+  color: var(--cf-text-primary);
+  line-height: 1.6;
+  font-size: 15px;
+}
+
+/* ─── Números con fuente mono ─────────────────────── */
+.font-mono,
+.cf-number {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── Scrollbar personalizado ─────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--cf-border-md);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--cf-text-tertiary); }
+
+/* ─── Animaciones globales ───────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideInLeft {
+  from { opacity: 0; transform: translateX(-16px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.6; }
+}
+
+@keyframes count-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fadeIn    { animation: fadeIn 0.3s ease forwards; }
+.animate-slideIn   { animation: slideInLeft 0.3s ease forwards; }
+.animate-pulse-soft { animation: pulse-soft 2s ease-in-out infinite; }
+.animate-countUp   { animation: count-up 0.5s ease forwards; }
+
+/* ─── Skeleton loader ────────────────────────────── */
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--cf-bg-subtle) 25%,
+    var(--cf-border) 50%,
+    var(--cf-bg-subtle) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: var(--cf-radius-md);
+}
+
+/* ─── Utilidades ContaFácil ──────────────────────── */
+.cf-card {
+  background: var(--cf-bg-card);
+  border: 1px solid var(--cf-border);
+  border-radius: var(--cf-radius-lg);
+  box-shadow: var(--cf-shadow-sm);
+}
+
+.cf-card-hover {
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+.cf-card-hover:hover {
+  box-shadow: var(--cf-shadow-md);
+  border-color: var(--cf-border-md);
+}
+
+.cf-ingreso { color: var(--cf-green); }
+.cf-egreso  { color: var(--cf-red); }
+.cf-neutral { color: var(--cf-text-secondary); }
+
+/* ─── Semáforo ────────────────────────────────────── */
+.semaforo-verde   { background: var(--cf-green);  }
+.semaforo-amarillo{ background: var(--cf-amber);  }
+.semaforo-rojo    { background: var(--cf-red);    }
