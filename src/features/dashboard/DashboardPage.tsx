@@ -1,354 +1,417 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
-import { useQuery } from '@tanstack/react-query'
-import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/stores/authStore'
-import { formatCurrency, calcularSemaforo } from '@/lib/utils'
-import { format, startOfMonth, endOfMonth, subMonths } from 'date-fns'
+import { formatCurrency, formatPeriod, calcularSemaforo } from '@/lib/utils'
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
+import { format, subMonths, startOfMonth, endOfMonth } from 'date-fns'
 import { es } from 'date-fns/locale'
+import { toast } from 'sonner'
 
-function useDashboardMetrics(orgId: string, period: Date) {
-  return useQuery({
-    queryKey: ['dashboard-metrics', orgId, format(period, 'yyyy-MM')],
-    queryFn: async () => {
-      const from = format(startOfMonth(period), 'yyyy-MM-dd')
-      const to = format(endOfMonth(period), 'yyyy-MM-dd')
-      const { data, error } = await supabase
-        .from('transactions')
-        .select('type, amount, iva, date')
-        .eq('org_id', orgId)
-        .eq('status', 'confirmado')
-        .gte('date', from)
-        .lte('date', to)
-      if (error) throw error
-      const ingresos = (data ?? []).filter(t => t.type === 'ingreso').reduce((s, t) => s + Number(t.amount), 0)
-      const egresos = (data ?? []).filter(t => t.type === 'egreso').reduce((s, t) => s + Number(t.amount), 0)
-      const ivaEstimado = ingresos * 0.16 - egresos * 0.16
-      const isrEstimado = ingresos * 0.01
-      const impuestos = Math.max(0, ivaEstimado + isrEstimado)
-      const libre = ingresos - egresos - impuestos
-      return { ingresos, egresos, impuestos, libre }
-    },
-    enabled: !!orgId,
-  })
+interface Metrics {
+  ingresos: number
+  egresos: number
+  impuestos: number
+  libre: number
+  margen: number
+  semaforo: 'verde' | 'amarillo' | 'rojo'
 }
 
-function useRecentTransactions(orgId: string) {
-  return useQuery({
-    queryKey: ['recent-transactions', orgId],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('transactions')
-        .select('*, category:categories(name, icon, color)')
-        .eq('org_id', orgId)
-        .eq('status', 'confirmado')
-        .order('created_at', { ascending: false })
-        .limit(5)
-      if (error) throw error
-      return data ?? []
-    },
-    enabled: !!orgId,
-  })
+interface ChartPoint { mes: string; ingresos: number; egresos: number }
+interface Declaracion { id: string; type: string; due_date: string; status: string; isr_calculado: number | null; iva_calculado: number | null }
+interface Transaccion { id: string; type: string; amount: number; description: string; date: string; payment_method: string | null; categories?: { name: string; icon: string } | null }
+
+const SEMAFORO_CONFIG = {
+  verde:    { color: '#1D9E75', bg: '#EAF3DE', icono: '✓', titulo: 'Vas muy bien',    mensaje: 'Tus ingresos superan tus gastos. ¡Sigue así!' },
+  amarillo: { color: '#BA7517', bg: '#FAEEDA', icono: '!', titulo: 'Ojo con los gastos', mensaje: 'Tu margen está ajustado. Revisa tus egresos.' },
+  rojo:     { color: '#A32D2D', bg: '#FCEBEB', icono: '✕', titulo: 'Mes complicado',  mensaje: 'Tus gastos superan tus ingresos este mes.' },
 }
 
-function useChartData(orgId: string) {
-  return useQuery({
-    queryKey: ['chart-data', orgId],
-    queryFn: async () => {
-      const meses = Array.from({ length: 6 }, (_, i) => subMonths(new Date(), 5 - i))
-      return Promise.all(meses.map(async (mes) => {
-        const from = format(startOfMonth(mes), 'yyyy-MM-dd')
-        const to = format(endOfMonth(mes), 'yyyy-MM-dd')
-        const { data } = await supabase
-          .from('transactions')
-          .select('type, amount')
-          .eq('org_id', orgId)
-          .eq('status', 'confirmado')
-          .gte('date', from)
-          .lte('date', to)
-        const ingresos = (data ?? []).filter(t => t.type === 'ingreso').reduce((s, t) => s + Number(t.amount), 0)
-        const egresos = (data ?? []).filter(t => t.type === 'egreso').reduce((s, t) => s + Number(t.amount), 0)
-        return { mes: format(mes, 'MMM', { locale: es }), ingresos: Math.round(ingresos), egresos: Math.round(egresos) }
-      }))
-    },
-    enabled: !!orgId,
-  })
+const Sk = ({ h = 20, w = '100%' }: { h?: number; w?: string }) => (
+  <div className="skeleton" style={{ height: h, width: w, borderRadius: 8 }} />
+)
+
+// Hook para detectar tamaño de pantalla
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(window.innerWidth < 640)
+  useEffect(() => {
+    const handler = () => setIsMobile(window.innerWidth < 640)
+    window.addEventListener('resize', handler)
+    return () => window.removeEventListener('resize', handler)
+  }, [])
+  return isMobile
 }
 
-function Skeleton({ w = '100%', h = 20, radius = 8 }: { w?: string | number; h?: number; radius?: number }) {
-  return <div className="skeleton" style={{ width: w, height: h, borderRadius: radius }} />
-}
-
-function MetricCard({ label, value, sub, color, icon, delay = 0, isLoading }: {
-  label: string; value: string; sub?: string; color: string; icon: string; delay?: number; isLoading?: boolean
-}) {
-  return (
-    <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}
-      transition={{ delay, duration: 0.35 }} className="cf-card" style={{ padding: '18px 20px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-        <div style={{
-          width: 36, height: 36, borderRadius: 10, background: `${color}18`,
-          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0,
-        }}>{icon}</div>
-        <span style={{ fontSize: 12, color: 'var(--cf-text-tertiary)', fontWeight: 500 }}>{label}</span>
-      </div>
-      {isLoading
-        ? <Skeleton h={28} radius={6} />
-        : <div style={{ fontSize: 22, fontWeight: 700, color, fontFamily: 'var(--font-mono)', letterSpacing: '-0.5px' }}>{value}</div>
-      }
-      {sub && !isLoading && <div style={{ fontSize: 11, color: 'var(--cf-text-tertiary)', marginTop: 4 }}>{sub}</div>}
-    </motion.div>
-  )
-}
-
-function SemaforoCard({ ingresos, egresos, impuestos, isLoading }: {
-  ingresos: number; egresos: number; impuestos: number; isLoading: boolean
-}) {
-  const { status, margen } = calcularSemaforo(ingresos, egresos, impuestos)
-  const config = {
-    verde: { color: '#1D9E75', bg: '#EAF3DE', emoji: '✅', titulo: 'Vas muy bien este mes', msg: 'Tus ingresos superan tus gastos. Sigue así.' },
-    amarillo: { color: '#BA7517', bg: '#FAEEDA', emoji: '⚠️', titulo: 'Ojo con los gastos', msg: 'Tu margen está ajustado. Revisa tus egresos.' },
-    rojo: { color: '#A32D2D', bg: '#FCEBEB', emoji: '🔴', titulo: 'Mes complicado', msg: 'Tus gastos superan tus ingresos este mes.' },
-  }
-  const c = config[isLoading ? 'verde' : status]
-  return (
-    <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}
-      className="cf-card" style={{ padding: '20px 24px', display: 'flex', alignItems: 'center', gap: 20 }}>
-      <div style={{
-        width: 60, height: 60, borderRadius: '50%',
-        background: isLoading ? 'var(--cf-bg-subtle)' : c.bg,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        fontSize: 26, flexShrink: 0,
-        animation: !isLoading && status !== 'verde' ? 'pulse-soft 2s infinite' : 'none',
-      }}>{isLoading ? '⏳' : c.emoji}</div>
-      <div style={{ flex: 1 }}>
-        <div style={{ fontSize: 11, color: 'var(--cf-text-tertiary)', marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-          Salud financiera del mes
-        </div>
-        {isLoading ? <Skeleton h={20} w="60%" radius={4} /> : <div style={{ fontSize: 16, fontWeight: 700, color: c.color }}>{c.titulo}</div>}
-        {isLoading ? <div style={{ marginTop: 4 }}><Skeleton h={14} w="80%" radius={4} /></div>
-          : <div style={{ fontSize: 13, color: 'var(--cf-text-secondary)', marginTop: 2 }}>{c.msg}</div>}
-      </div>
-      <div style={{ textAlign: 'center', flexShrink: 0 }}>
-        <div style={{ fontSize: 11, color: 'var(--cf-text-tertiary)', marginBottom: 4 }}>Margen neto</div>
-        {isLoading ? <Skeleton h={32} w={60} radius={6} />
-          : <div style={{ fontSize: 24, fontWeight: 700, color: c.color, fontFamily: 'var(--font-mono)' }}>{Math.round(margen)}%</div>}
-        <div style={{ width: 60, height: 4, background: 'var(--cf-bg-subtle)', borderRadius: 2, overflow: 'hidden', marginTop: 4 }}>
-          {!isLoading && (
-            <motion.div initial={{ width: 0 }} animate={{ width: `${Math.min(100, Math.max(0, margen))}%` }}
-              transition={{ delay: 0.5, duration: 0.8 }}
-              style={{ height: '100%', background: c.color, borderRadius: 2 }} />
-          )}
-        </div>
-      </div>
-    </motion.div>
-  )
-}
-
-function CustomTooltip({ active, payload, label }: any) {
-  if (!active || !payload?.length) return null
-  return (
-    <div style={{ background: 'var(--cf-bg-card)', border: '1px solid var(--cf-border)', borderRadius: 10, padding: '10px 14px', fontSize: 12 }}>
-      <div style={{ fontWeight: 600, marginBottom: 6, color: 'var(--cf-text-primary)', textTransform: 'capitalize' }}>{label}</div>
-      {payload.map((p: any) => (
-        <div key={p.name} style={{ color: p.color, marginBottom: 2 }}>
-          {p.name === 'ingresos' ? '↑ Entró: ' : '↓ Salió: '}<strong>{formatCurrency(p.value)}</strong>
-        </div>
-      ))}
-    </div>
-  )
+function useIsTablet() {
+  const [isTablet, setIsTablet] = useState(window.innerWidth < 1024)
+  useEffect(() => {
+    const handler = () => setIsTablet(window.innerWidth < 1024)
+    window.addEventListener('resize', handler)
+    return () => window.removeEventListener('resize', handler)
+  }, [])
+  return isTablet
 }
 
 export default function DashboardPage() {
   const { activeOrg, user } = useAuthStore()
-  const [period] = useState(new Date())
-  const orgId = activeOrg?.id ?? ''
+  const [metrics, setMetrics] = useState<Metrics | null>(null)
+  const [chartData, setChartData] = useState<ChartPoint[]>([])
+  const [declaraciones, setDeclaraciones] = useState<Declaracion[]>([])
+  const [transacciones, setTransacciones] = useState<Transaccion[]>([])
+  const [isLoading, setIsLoading] = useState(true)
+  const [periodo, setPeriodo] = useState(format(new Date(), 'yyyy-MM'))
+  const isMobile = useIsMobile()
+  const isTablet = useIsTablet()
 
-  const { data: metrics, isLoading: metricsLoading } = useDashboardMetrics(orgId, period)
-  const { data: recent, isLoading: recentLoading } = useRecentTransactions(orgId)
-  const { data: chartData, isLoading: chartLoading } = useChartData(orgId)
-
+  const nombreUsuario = user?.email?.split('@')[0] ?? 'por aquí'
   const hora = new Date().getHours()
   const saludo = hora < 12 ? 'Buenos días' : hora < 19 ? 'Buenas tardes' : 'Buenas noches'
-  const nombreUsuario = activeOrg?.name ?? user?.email?.split('@')[0] ?? ''
-  const mesActual = format(period, "MMMM 'de' yyyy", { locale: es })
-  const sinDatos = !metricsLoading && metrics?.ingresos === 0 && metrics?.egresos === 0
+
+  useEffect(() => {
+    if (activeOrg) loadDashboard()
+  }, [activeOrg, periodo])
+
+  const loadDashboard = async () => {
+    if (!activeOrg) return
+    setIsLoading(true)
+    const [year, month] = periodo.split('-')
+    const desde = format(startOfMonth(new Date(parseInt(year), parseInt(month) - 1)), 'yyyy-MM-dd')
+    const hasta = format(endOfMonth(new Date(parseInt(year), parseInt(month) - 1)), 'yyyy-MM-dd')
+
+    try {
+      const { data: txs } = await supabase
+        .from('transactions')
+        .select('*, categories(name, icon)')
+        .eq('org_id', activeOrg.id)
+        .eq('status', 'confirmado')
+        .gte('date', desde)
+        .lte('date', hasta)
+        .order('date', { ascending: false })
+
+      const ingresos = (txs ?? []).filter(t => t.type === 'ingreso').reduce((s, t) => s + Number(t.amount), 0)
+      const egresos = (txs ?? []).filter(t => t.type === 'egreso').reduce((s, t) => s + Number(t.amount), 0)
+      const impuestos = (txs ?? []).reduce((s, t) => s + Number(t.iva ?? 0), 0)
+      const { status, margen } = calcularSemaforo(ingresos, egresos, impuestos)
+
+      setMetrics({ ingresos, egresos, impuestos, libre: ingresos - egresos - impuestos, margen, semaforo: status })
+      setTransacciones((txs ?? []).slice(0, 5))
+
+      // Gráfica 6 meses
+      const meses: ChartPoint[] = []
+      for (let i = 5; i >= 0; i--) {
+        const fecha = subMonths(new Date(), i)
+        const ini = format(startOfMonth(fecha), 'yyyy-MM-dd')
+        const fin = format(endOfMonth(fecha), 'yyyy-MM-dd')
+        const { data: mtxs } = await supabase
+          .from('transactions').select('type, amount')
+          .eq('org_id', activeOrg.id).eq('status', 'confirmado')
+          .gte('date', ini).lte('date', fin)
+        const ing = (mtxs ?? []).filter(t => t.type === 'ingreso').reduce((s, t) => s + Number(t.amount), 0)
+        const egr = (mtxs ?? []).filter(t => t.type === 'egreso').reduce((s, t) => s + Number(t.amount), 0)
+        meses.push({ mes: format(fecha, 'MMM', { locale: es }), ingresos: ing, egresos: egr })
+      }
+      setChartData(meses)
+
+      const { data: decls } = await supabase
+        .from('tax_declarations').select('*')
+        .eq('org_id', activeOrg.id)
+        .in('status', ['pendiente', 'presentada'])
+        .order('due_date', { ascending: true }).limit(3)
+      setDeclaraciones(decls ?? [])
+    } catch (err) {
+      toast.error('Error cargando dashboard')
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const sem = metrics ? SEMAFORO_CONFIG[metrics.semaforo] : null
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: isMobile ? 14 : 20 }}>
 
-      {/* Topbar */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+      {/* ── Topbar ── */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
         <div>
-          <motion.h1 initial={{ opacity: 0, x: -16 }} animate={{ opacity: 1, x: 0 }}
-            style={{ fontSize: 22, fontWeight: 700, color: 'var(--cf-navy)', margin: 0 }}>
+          <h1 style={{ fontSize: isMobile ? 18 : 20, fontWeight: 700, color: 'var(--cf-navy)', margin: 0 }}>
             {saludo}, {nombreUsuario} 👋
-          </motion.h1>
-          <p style={{ fontSize: 13, color: 'var(--cf-text-tertiary)', margin: '4px 0 0', textTransform: 'capitalize' }}>
-            {mesActual}
+          </h1>
+          <p style={{ fontSize: 12, color: 'var(--cf-text-tertiary)', margin: '2px 0 0' }}>
+            {activeOrg?.name} · {formatPeriod(periodo)}
           </p>
         </div>
-        <motion.button initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3 }}
-          onClick={() => window.location.href = '/ingresos'}
-          style={{
-            padding: '10px 20px', borderRadius: 10, border: 'none',
-            background: 'var(--cf-navy)', color: '#fff', fontSize: 14, fontWeight: 600,
-            cursor: 'pointer', fontFamily: 'var(--font-sans)', display: 'flex', alignItems: 'center', gap: 8,
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <select
+            value={periodo}
+            onChange={e => setPeriodo(e.target.value)}
+            style={{
+              padding: isMobile ? '6px 10px' : '8px 12px',
+              borderRadius: 8, fontSize: isMobile ? 12 : 13,
+              border: '1px solid var(--cf-border)',
+              background: 'var(--cf-bg-card)',
+              color: 'var(--cf-text-primary)',
+              fontFamily: 'var(--font-sans)', cursor: 'pointer',
+            }}
+          >
+            {Array.from({ length: 6 }).map((_, i) => {
+              const d = subMonths(new Date(), i)
+              const val = format(d, 'yyyy-MM')
+              const label = format(d, 'MMMM yyyy', { locale: es })
+              return <option key={val} value={val}>{label.charAt(0).toUpperCase() + label.slice(1)}</option>
+            })}
+          </select>
+          {!isMobile && (
+            <button style={{
+              padding: '8px 18px', borderRadius: 8, border: 'none',
+              background: 'var(--cf-navy)', color: '#fff',
+              fontSize: 13, fontWeight: 600, cursor: 'pointer',
+              fontFamily: 'var(--font-sans)',
+            }}>
+              + Registrar
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* ── Semáforo ── */}
+      {isLoading ? <Sk h={isMobile ? 80 : 90} /> : metrics && sem ? (
+        <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}
+          className="cf-card"
+          style={{ padding: isMobile ? '14px 16px' : '20px 24px', display: 'flex', alignItems: 'center', gap: isMobile ? 12 : 20, flexWrap: 'wrap' }}
+        >
+          <div style={{
+            width: isMobile ? 44 : 56, height: isMobile ? 44 : 56, borderRadius: '50%',
+            background: sem.color, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            flexShrink: 0, fontSize: isMobile ? 18 : 22, color: '#fff', fontWeight: 700,
           }}>
-          + Registrar movimiento
-        </motion.button>
-      </div>
-
-      {/* Semáforo */}
-      <SemaforoCard
-        ingresos={metrics?.ingresos ?? 0}
-        egresos={metrics?.egresos ?? 0}
-        impuestos={metrics?.impuestos ?? 0}
-        isLoading={metricsLoading}
-      />
-
-      {/* 4 Métricas */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
-        <MetricCard label="Entró este mes" value={formatCurrency(metrics?.ingresos ?? 0)} icon="💚" color="#1D9E75" delay={0.1} isLoading={metricsLoading} />
-        <MetricCard label="Salió este mes" value={formatCurrency(metrics?.egresos ?? 0)} icon="🔴" color="#A32D2D" delay={0.15} isLoading={metricsLoading} />
-        <MetricCard label="Le debo al SAT" value={formatCurrency(metrics?.impuestos ?? 0)} sub="Estimado — IVA + ISR" icon="🏛️" color="#BA7517" delay={0.2} isLoading={metricsLoading} />
-        <MetricCard label="Me queda libre" value={formatCurrency(metrics?.libre ?? 0)} sub="Después de impuestos" icon="✨" color="#185FA5" delay={0.25} isLoading={metricsLoading} />
-      </div>
-
-      {/* Gráfica + Últimos movimientos */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
-
-        {/* Gráfica */}
-        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }}
-          className="cf-card" style={{ padding: '20px 24px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--cf-text-primary)' }}>Ingresos vs gastos</div>
-              <div style={{ fontSize: 12, color: 'var(--cf-text-tertiary)' }}>Últimos 6 meses</div>
+            {sem.icono}
+          </div>
+          <div style={{ flex: 1, minWidth: isMobile ? '100%' : 200 }}>
+            <div style={{ fontSize: isMobile ? 14 : 15, fontWeight: 700, color: sem.color }}>{sem.titulo}</div>
+            <div style={{ fontSize: isMobile ? 12 : 13, color: 'var(--cf-text-tertiary)', marginTop: 2 }}>{sem.mensaje}</div>
+          </div>
+          <div style={{ flex: isMobile ? 'none' : 1, width: isMobile ? '100%' : 'auto', minWidth: 180 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--cf-text-tertiary)', marginBottom: 6 }}>
+              <span>Margen neto</span>
+              <span style={{ fontWeight: 600, color: sem.color, fontFamily: 'var(--font-mono)' }}>{Math.max(0, Math.round(metrics.margen))}%</span>
             </div>
-            <div style={{ display: 'flex', gap: 16, fontSize: 12 }}>
-              <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                <span style={{ width: 10, height: 10, borderRadius: 2, background: '#1D9E75', display: 'inline-block' }} />
-                <span style={{ color: 'var(--cf-text-secondary)' }}>Ingresos</span>
-              </span>
-              <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                <span style={{ width: 10, height: 10, borderRadius: 2, background: '#F09595', display: 'inline-block' }} />
-                <span style={{ color: 'var(--cf-text-secondary)' }}>Gastos</span>
-              </span>
+            <div style={{ height: 6, background: 'var(--cf-bg-subtle)', borderRadius: 3, overflow: 'hidden' }}>
+              <motion.div
+                initial={{ width: 0 }} animate={{ width: `${Math.min(100, Math.max(0, metrics.margen))}%` }}
+                transition={{ duration: 0.8, ease: 'easeOut' }}
+                style={{ height: '100%', background: sem.color, borderRadius: 3 }}
+              />
             </div>
           </div>
-          {chartLoading ? (
-            <Skeleton h={200} radius={8} />
-          ) : sinDatos ? (
-            <div style={{ height: 200, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
-              <div style={{ fontSize: 40 }}>📊</div>
-              <div style={{ fontSize: 13, color: 'var(--cf-text-tertiary)', textAlign: 'center', lineHeight: 1.6 }}>
-                Aún no hay movimientos.<br />Registra tu primer ingreso o gasto para ver la gráfica.
-              </div>
-            </div>
-          ) : (
-            <ResponsiveContainer width="100%" height={200}>
-              <AreaChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+        </motion.div>
+      ) : null}
+
+      {/* ── 4 Métricas ── */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4, minmax(0,1fr))',
+        gap: isMobile ? 10 : 12,
+      }}>
+        {[
+          { label: 'Entró este mes',    value: metrics?.ingresos ?? 0,   color: 'var(--cf-green)',  icon: '↑' },
+          { label: 'Salió este mes',    value: metrics?.egresos ?? 0,    color: 'var(--cf-red)',    icon: '↓' },
+          { label: 'Le debo al SAT',    value: metrics?.impuestos ?? 0,  color: 'var(--cf-amber)',  icon: '🏛' },
+          { label: 'Me queda libre',    value: metrics?.libre ?? 0,      color: 'var(--cf-navy)',   icon: '✓' },
+        ].map((card, i) => (
+          <motion.div key={card.label}
+            initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.08 }}
+            className="cf-card cf-card-hover"
+            style={{ padding: isMobile ? '12px 14px' : '18px 20px' }}
+          >
+            {isLoading ? (
+              <><Sk h={12} w="60%" /><div style={{ marginTop: 8 }}><Sk h={isMobile ? 22 : 28} w="80%" /></div></>
+            ) : (
+              <>
+                <div style={{ fontSize: isMobile ? 10 : 11, color: 'var(--cf-text-tertiary)', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
+                  {card.label}
+                </div>
+                <div style={{ fontSize: isMobile ? 16 : 22, fontWeight: 700, color: card.color, fontFamily: 'var(--font-mono)' }}>
+                  {formatCurrency(card.value)}
+                </div>
+              </>
+            )}
+          </motion.div>
+        ))}
+      </div>
+
+      {/* ── Gráfica + SAT — una columna en móvil/tablet ── */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: isTablet ? '1fr' : '1fr 340px',
+        gap: isMobile ? 14 : 16,
+      }}>
+        {/* Gráfica */}
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3 }}
+          className="cf-card" style={{ padding: isMobile ? '14px 16px' : '20px 24px' }}
+        >
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--cf-text-secondary)', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            Ingresos vs Egresos — últimos 6 meses
+          </div>
+          {isLoading ? <Sk h={isMobile ? 150 : 200} /> : (
+            <ResponsiveContainer width="100%" height={isMobile ? 160 : 200}>
+              <AreaChart data={chartData} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
                 <defs>
-                  <linearGradient id="gradIngreso" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#1D9E75" stopOpacity={0.2} />
+                  <linearGradient id="gradI" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#1D9E75" stopOpacity={0.3} />
                     <stop offset="95%" stopColor="#1D9E75" stopOpacity={0} />
                   </linearGradient>
-                  <linearGradient id="gradEgreso" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#F09595" stopOpacity={0.2} />
-                    <stop offset="95%" stopColor="#F09595" stopOpacity={0} />
+                  <linearGradient id="gradE" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#A32D2D" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="#A32D2D" stopOpacity={0} />
                   </linearGradient>
                 </defs>
-                <XAxis dataKey="mes" tick={{ fontSize: 11, fill: 'var(--cf-text-tertiary)' }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: 'var(--cf-text-tertiary)' }} axisLine={false} tickLine={false} tickFormatter={v => `$${(v / 1000).toFixed(0)}k`} />
-                <Tooltip content={<CustomTooltip />} />
-                <Area type="monotone" dataKey="ingresos" stroke="#1D9E75" strokeWidth={2} fill="url(#gradIngreso)" />
-                <Area type="monotone" dataKey="egresos" stroke="#F09595" strokeWidth={2} fill="url(#gradEgreso)" />
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--cf-border)" />
+                <XAxis dataKey="mes" tick={{ fontSize: 10, fill: 'var(--cf-text-tertiary)' }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize: 10, fill: 'var(--cf-text-tertiary)' }} axisLine={false} tickLine={false}
+                  tickFormatter={v => v >= 1000 ? `$${(v / 1000).toFixed(0)}k` : `$${v}`} />
+                <Tooltip
+                  contentStyle={{ background: 'var(--cf-bg-card)', border: '1px solid var(--cf-border)', borderRadius: 8, fontSize: 12 }}
+                  formatter={(value: number) => [formatCurrency(value), '']}
+                />
+                <Area type="monotone" dataKey="ingresos" stroke="#1D9E75" strokeWidth={2} fill="url(#gradI)" name="Ingresos" />
+                <Area type="monotone" dataKey="egresos" stroke="#A32D2D" strokeWidth={2} fill="url(#gradE)" name="Egresos" />
               </AreaChart>
             </ResponsiveContainer>
           )}
+          <div style={{ display: 'flex', gap: 16, marginTop: 10 }}>
+            {[{ color: '#1D9E75', label: 'Ingresos' }, { color: '#A32D2D', label: 'Egresos' }].map(l => (
+              <div key={l.label} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--cf-text-tertiary)' }}>
+                <div style={{ width: 10, height: 10, borderRadius: 2, background: l.color }} />
+                {l.label}
+              </div>
+            ))}
+          </div>
         </motion.div>
 
-        {/* Últimos movimientos */}
-        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.35 }}
-          className="cf-card" style={{ padding: '20px 24px' }}>
-          <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--cf-text-primary)', marginBottom: 16 }}>Últimos movimientos</div>
-          {recentLoading ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} h={48} radius={8} />)}
+        {/* Panel SAT */}
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.4 }}
+          className="cf-card" style={{ padding: isMobile ? '14px 16px' : '20px 24px' }}
+        >
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--cf-text-secondary)', marginBottom: 14, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            ¿Qué le debo al SAT?
+          </div>
+          {isLoading ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <Sk h={50} /><Sk h={50} /><Sk h={50} />
             </div>
-          ) : !recent?.length ? (
-            <div style={{ textAlign: 'center', padding: '30px 0' }}>
-              <div style={{ fontSize: 32, marginBottom: 8 }}>📋</div>
-              <div style={{ fontSize: 13, color: 'var(--cf-text-tertiary)', lineHeight: 1.6 }}>
-                No hay movimientos aún.<br />¡Registra el primero!
-              </div>
+          ) : declaraciones.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '24px 12px', color: 'var(--cf-text-tertiary)', fontSize: 13 }}>
+              <div style={{ fontSize: 28, marginBottom: 8 }}>🎉</div>
+              Sin obligaciones pendientes este mes
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {recent.map((tx: any, i: number) => (
-                <motion.div key={tx.id} initial={{ opacity: 0, x: 16 }} animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: 0.4 + i * 0.05 }}
-                  style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 10, background: 'var(--cf-bg-subtle)' }}>
-                  <div style={{
-                    width: 32, height: 32, borderRadius: '50%',
-                    background: tx.type === 'ingreso' ? '#EAF3DE' : '#FCEBEB',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, flexShrink: 0,
-                  }}>{tx.category?.icon ?? (tx.type === 'ingreso' ? '💚' : '🔴')}</div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--cf-text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {tx.description}
+              {declaraciones.map(d => {
+                const dias = Math.ceil((new Date(d.due_date).getTime() - Date.now()) / 86400000)
+                const urgente = dias <= 5
+                return (
+                  <div key={d.id} style={{
+                    padding: '10px 12px', borderRadius: 10,
+                    background: urgente ? 'var(--cf-red-light)' : 'var(--cf-bg-subtle)',
+                    border: `1px solid ${urgente ? 'var(--cf-red)' : 'var(--cf-border)'}`,
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  }}>
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--cf-text-primary)' }}>
+                        {d.type === 'iva_mensual' ? 'IVA Mensual' : 'ISR Mensual'}
+                      </div>
+                      <div style={{ fontSize: 10, color: 'var(--cf-text-tertiary)', marginTop: 2 }}>
+                        Vence: {format(new Date(d.due_date), 'dd MMM', { locale: es })}
+                      </div>
                     </div>
-                    <div style={{ fontSize: 11, color: 'var(--cf-text-tertiary)' }}>{tx.category?.name ?? '—'}</div>
+                    <span style={{
+                      fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 20,
+                      background: dias < 0 ? '#A32D2D' : urgente ? '#BA7517' : '#1D9E75',
+                      color: '#fff',
+                    }}>
+                      {dias < 0 ? 'Vencida' : `${dias}d`}
+                    </span>
                   </div>
-                  <div style={{ fontSize: 13, fontWeight: 700, flexShrink: 0, color: tx.type === 'ingreso' ? '#1D9E75' : '#A32D2D', fontFamily: 'var(--font-mono)' }}>
-                    {tx.type === 'ingreso' ? '+' : '-'}{formatCurrency(tx.amount)}
-                  </div>
-                </motion.div>
-              ))}
+                )
+              })}
             </div>
           )}
-          {!!recent?.length && (
-            <button onClick={() => window.location.href = '/ingresos'}
-              style={{
-                width: '100%', marginTop: 14, padding: '9px', background: 'none',
-                border: '1px solid var(--cf-border)', borderRadius: 8, fontSize: 13,
-                color: 'var(--cf-text-secondary)', cursor: 'pointer', fontFamily: 'var(--font-sans)', transition: 'all 0.2s',
-              }}
-              onMouseEnter={e => e.currentTarget.style.background = 'var(--cf-bg-subtle)'}
-              onMouseLeave={e => e.currentTarget.style.background = 'none'}>
-              Ver todos los movimientos →
-            </button>
+          {metrics && metrics.impuestos > 0 && (
+            <div style={{
+              marginTop: 14, padding: '10px 12px',
+              background: 'var(--cf-amber-light)', borderRadius: 10,
+              fontSize: 12, color: 'var(--cf-amber)',
+              display: 'flex', justifyContent: 'space-between',
+            }}>
+              <span>Estimado este mes</span>
+              <span style={{ fontWeight: 700, fontFamily: 'var(--font-mono)' }}>{formatCurrency(metrics.impuestos)}</span>
+            </div>
           )}
         </motion.div>
       </div>
 
-      {/* Banner primer movimiento */}
-      {sinDatos && (
-        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.5 }}
-          style={{
-            padding: '20px 24px', borderRadius: 14,
-            background: 'linear-gradient(135deg, #0D1B2A 0%, #185FA5 100%)',
-            display: 'flex', alignItems: 'center', gap: 20,
-          }}>
-          <div style={{ fontSize: 40 }}>🚀</div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: '#fff', marginBottom: 4 }}>¡Registra tu primer movimiento!</div>
-            <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.7)' }}>
-              Agrega un ingreso o gasto y ContaFácil calculará tus impuestos automáticamente.
-            </div>
+      {/* ── Últimas transacciones ── */}
+      <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.5 }}
+        className="cf-card" style={{ padding: isMobile ? '14px 16px' : '20px 24px' }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--cf-text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            Últimos movimientos
           </div>
-          <button onClick={() => window.location.href = '/ingresos'}
-            style={{
-              padding: '10px 20px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.3)',
-              background: 'rgba(255,255,255,0.1)', color: '#fff', fontSize: 14, fontWeight: 600,
-              cursor: 'pointer', fontFamily: 'var(--font-sans)', whiteSpace: 'nowrap',
-            }}>
-            + Registrar ahora
+          <button style={{ background: 'none', border: 'none', fontSize: 12, color: 'var(--cf-blue)', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}>
+            Ver todos →
           </button>
-        </motion.div>
-      )}
+        </div>
+
+        {isLoading ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {[1, 2, 3].map(i => <Sk key={i} h={52} />)}
+          </div>
+        ) : transacciones.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '28px 16px', color: 'var(--cf-text-tertiary)', fontSize: 13 }}>
+            <div style={{ fontSize: 28, marginBottom: 8 }}>📋</div>
+            Aún no hay movimientos registrados este mes.
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {transacciones.map((tx, i) => (
+              <motion.div key={tx.id}
+                initial={{ opacity: 0, x: -12 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.06 }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: isMobile ? 10 : 12,
+                  padding: isMobile ? '8px 10px' : '10px 14px',
+                  borderRadius: 10, background: 'var(--cf-bg-subtle)',
+                }}
+              >
+                <div style={{
+                  width: isMobile ? 28 : 32, height: isMobile ? 28 : 32,
+                  borderRadius: '50%', flexShrink: 0,
+                  background: tx.type === 'ingreso' ? 'var(--cf-green-light)' : 'var(--cf-red-light)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13,
+                }}>
+                  {tx.categories?.icon ?? (tx.type === 'ingreso' ? '↑' : '↓')}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: isMobile ? 12 : 13, fontWeight: 500, color: 'var(--cf-text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {tx.description}
+                  </div>
+                  <div style={{ fontSize: 10, color: 'var(--cf-text-tertiary)' }}>
+                    {tx.categories?.name ?? ''} · {format(new Date(tx.date), 'dd MMM', { locale: es })}
+                  </div>
+                </div>
+                <div style={{
+                  fontSize: isMobile ? 13 : 14, fontWeight: 700,
+                  color: tx.type === 'ingreso' ? 'var(--cf-green)' : 'var(--cf-red)',
+                  fontFamily: 'var(--font-mono)', flexShrink: 0,
+                }}>
+                  {tx.type === 'ingreso' ? '+' : '-'}{formatCurrency(tx.amount)}
+                </div>
+              </motion.div>
+            ))}
+          </div>
+        )}
+      </motion.div>
+
     </div>
   )
 }
